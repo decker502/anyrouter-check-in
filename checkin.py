@@ -14,9 +14,9 @@ import httpx
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
 
-from notify import notify
-
 load_dotenv()
+
+from notify import notify
 
 BALANCE_HASH_FILE = 'balance_hash.txt'
 
@@ -110,9 +110,17 @@ async def get_waf_cookies_with_playwright(account_name: str):
 	async with async_playwright() as p:
 		import tempfile
 		with tempfile.TemporaryDirectory() as temp_dir:
+			# 配置代理（如果设置了环境变量）
+			proxy_config = None
+			proxy_url = os.getenv('HTTP_PROXY') or os.getenv('http_proxy')
+			if proxy_url:
+				proxy_config = {'server': proxy_url}
+
 			context = await p.chromium.launch_persistent_context(
 				user_data_dir=temp_dir,
 				headless=False,
+				ignore_https_errors=True,
+				proxy=proxy_config,
 				user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
 				viewport={'width': 1920, 'height': 1080},
 				args=[
@@ -173,6 +181,8 @@ def get_user_info(client, headers):
 		response = client.get('https://anyrouter.top/api/user/self', headers=headers, timeout=30)
 
 		if response.status_code == 200:
+			# 调试：输出响应内容
+			print(f'[DEBUG] User info response: {response.text[:200]}')
 			data = response.json()
 			if data.get('success'):
 				user_data = data.get('data', {})
@@ -215,7 +225,9 @@ async def check_in_account(account_info, account_index):
 		return False, None
 
 	# 步骤2：使用 httpx 进行 API 请求
-	client = httpx.Client(http2=True, timeout=30.0)
+	# 配置代理
+	proxy_url = os.getenv('HTTP_PROXY') or os.getenv('http_proxy')
+	client = httpx.Client(http2=True, timeout=30.0, proxy=proxy_url)
 
 	try:
 		# 合并 WAF cookies 和用户 cookies
@@ -253,6 +265,8 @@ async def check_in_account(account_info, account_index):
 		print(f'[RESPONSE] {account_name}: Response status code {response.status_code}')
 
 		if response.status_code == 200:
+			# 调试：输出响应内容
+			print(f'[DEBUG] Check-in response: {response.text[:500]}')
 			try:
 				result = response.json()
 				if result.get('ret') == 1 or result.get('code') == 0 or result.get('success'):
