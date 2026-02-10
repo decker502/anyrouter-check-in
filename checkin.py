@@ -84,7 +84,14 @@ def generate_balance_hash(balances):
 
 def get_account_display_name(account_info, account_index):
 	"""获取账号显示名称"""
-	return account_info.get('name', f'Account {account_index + 1}')
+	return account_info.get('name', account_info.get('api_user', f'Account {account_index + 1}'))
+
+
+def mask_sensitive_info(text):
+	"""屏蔽敏感信息，保留前2个字符，其余用*替代"""
+	if not text or len(text) <= 2:
+		return '***'
+	return text[:2] + '*' * (len(text) - 2)
 
 
 def parse_cookies(cookies_data):
@@ -104,7 +111,8 @@ def parse_cookies(cookies_data):
 
 async def check_in_with_playwright(account_name: str, user_cookies: dict, api_user: str):
 	"""使用 Playwright 执行完整的签到流程"""
-	print(f'[PROCESSING] {account_name}: Starting browser for check-in...')
+	masked_name = mask_sensitive_info(account_name)
+	print(f'[PROCESSING] {masked_name}: Starting browser for check-in...')
 
 	async with async_playwright() as p:
 		import tempfile
@@ -135,7 +143,7 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 
 			try:
 				# 步骤1：访问登录页面获取 WAF cookies
-				print(f'[PROCESSING] {account_name}: Accessing login page to get WAF cookies...')
+				print(f'[PROCESSING] {masked_name}: Accessing login page to get WAF cookies...')
 				await page.goto('https://anyrouter.top/login', wait_until='networkidle')
 
 				try:
@@ -144,7 +152,7 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 					await page.wait_for_timeout(3000)
 
 				# 步骤2：设置用户 cookies
-				print(f'[PROCESSING] {account_name}: Setting user cookies...')
+				print(f'[PROCESSING] {masked_name}: Setting user cookies...')
 				cookie_list = []
 				for name, value in user_cookies.items():
 					cookie_list.append({
@@ -156,12 +164,12 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 				await context.add_cookies(cookie_list)
 
 				# 步骤3：访问控制台页面确保登录状态
-				print(f'[PROCESSING] {account_name}: Accessing console page...')
+				print(f'[PROCESSING] {masked_name}: Accessing console page...')
 				await page.goto('https://anyrouter.top/console', wait_until='networkidle')
 				await page.wait_for_timeout(2000)
 
 				# 步骤4：使用浏览器的 fetch API 获取用户信息
-				print(f'[PROCESSING] {account_name}: Getting user info...')
+				print(f'[PROCESSING] {masked_name}: Getting user info...')
 				user_info_result = await page.evaluate(f"""
 					async () => {{
 						try {{
@@ -197,10 +205,10 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 							}
 							print(user_info['display'])
 					except Exception as e:
-						print(f'[WARN] {account_name}: Failed to parse user info: {str(e)[:50]}')
+						print(f'[WARN] {masked_name}: Failed to parse user info: {str(e)[:50]}')
 
 				# 步骤5：使用浏览器的 fetch API 执行签到
-				print(f'[NETWORK] {account_name}: Executing check-in')
+				print(f'[NETWORK] {masked_name}: Executing check-in')
 				checkin_result = await page.evaluate(f"""
 					async () => {{
 						try {{
@@ -221,7 +229,7 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 					}}
 				""")
 
-				print(f'[RESPONSE] {account_name}: Response status code {checkin_result.get("status", "unknown")}')
+				print(f'[RESPONSE] {masked_name}: Response status code {checkin_result.get("status", "unknown")}')
 
 				await context.close()
 
@@ -230,27 +238,27 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 					try:
 						result = json.loads(checkin_result['text'])
 						if result.get('ret') == 1 or result.get('code') == 0 or result.get('success'):
-							print(f'[SUCCESS] {account_name}: Check-in successful!')
+							print(f'[SUCCESS] {masked_name}: Check-in successful!')
 							return True, user_info
 						else:
 							error_msg = result.get('msg', result.get('message', 'Unknown error'))
-							print(f'[FAILED] {account_name}: Check-in failed - {error_msg}')
+							print(f'[FAILED] {masked_name}: Check-in failed - {error_msg}')
 							return False, user_info
 					except json.JSONDecodeError:
 						if 'success' in checkin_result['text'].lower():
-							print(f'[SUCCESS] {account_name}: Check-in successful!')
+							print(f'[SUCCESS] {masked_name}: Check-in successful!')
 							return True, user_info
 						else:
-							print(f'[FAILED] {account_name}: Check-in failed - Invalid response format')
+							print(f'[FAILED] {masked_name}: Check-in failed - Invalid response format')
 							print(f'[DEBUG] Response: {checkin_result["text"][:200]}')
 							return False, user_info
 				else:
 					error = checkin_result.get('error', 'Unknown error')
-					print(f'[FAILED] {account_name}: Check-in failed - {error}')
+					print(f'[FAILED] {masked_name}: Check-in failed - {error}')
 					return False, user_info
 
 			except Exception as e:
-				print(f'[FAILED] {account_name}: Error during check-in: {str(e)[:100]}')
+				print(f'[FAILED] {masked_name}: Error during check-in: {str(e)[:100]}')
 				await context.close()
 				return False, None
 
@@ -258,20 +266,21 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 async def check_in_account(account_info, account_index):
 	"""为单个账号执行签到操作"""
 	account_name = get_account_display_name(account_info, account_index)
-	print(f'\n[PROCESSING] Starting to process {account_name}')
+	masked_name = mask_sensitive_info(account_name)
+	print(f'\n[PROCESSING] Starting to process {masked_name}')
 
 	# 解析账号配置
 	cookies_data = account_info.get('cookies', {})
 	api_user = account_info.get('api_user', '')
 
 	if not api_user:
-		print(f'[FAILED] {account_name}: API user identifier not found')
+		print(f'[FAILED] {masked_name}: API user identifier not found')
 		return False, None
 
 	# 解析用户 cookies
 	user_cookies = parse_cookies(cookies_data)
 	if not user_cookies:
-		print(f'[FAILED] {account_name}: Invalid configuration format')
+		print(f'[FAILED] {masked_name}: Invalid configuration format')
 		return False, None
 
 	# 使用 Playwright 执行完整的签到流程
@@ -317,7 +326,8 @@ async def main():
 				should_notify_this_account = True
 				need_notify = True
 				account_name = get_account_display_name(account, i)
-				print(f'[NOTIFY] {account_name} failed, will send notification')
+				masked_name = mask_sensitive_info(account_name)
+				print(f'[NOTIFY] {masked_name} failed, will send notification')
 
 			# 收集余额数据
 			if user_info and user_info.get('success'):
@@ -328,8 +338,9 @@ async def main():
 			# 只有需要通知的账号才收集内容
 			if should_notify_this_account:
 				account_name = get_account_display_name(account, i)
+				masked_name = mask_sensitive_info(account_name)
 				status = '[SUCCESS]' if success else '[FAIL]'
-				account_result = f'{status} {account_name}'
+				account_result = f'{status} {masked_name}'
 				if user_info and user_info.get('success'):
 					account_result += f'\n{user_info["display"]}'
 				elif user_info:
@@ -338,9 +349,10 @@ async def main():
 
 		except Exception as e:
 			account_name = get_account_display_name(account, i)
-			print(f'[FAILED] {account_name} processing exception: {e}')
+			masked_name = mask_sensitive_info(account_name)
+			print(f'[FAILED] {masked_name} processing exception: {e}')
 			need_notify = True  # 异常也需要通知
-			notification_content.append(f'[FAIL] {account_name} exception: {str(e)[:50]}...')
+			notification_content.append(f'[FAIL] {masked_name} exception: {str(e)[:50]}...')
 
 	# 检查余额变化
 	current_balance_hash = generate_balance_hash(current_balances) if current_balances else None
@@ -364,11 +376,12 @@ async def main():
 			account_key = f'account_{i + 1}'
 			if account_key in current_balances:
 				account_name = get_account_display_name(account, i)
+				masked_name = mask_sensitive_info(account_name)
 				# 只添加成功获取余额的账号，且避免重复添加
-				account_result = f'[BALANCE] {account_name}'
+				account_result = f'[BALANCE] {masked_name}'
 				account_result += f'\n:money: Current balance: ${current_balances[account_key]["quota"]}, Used: ${current_balances[account_key]["used"]}'
 				# 检查是否已经在通知内容中（避免重复）
-				if not any(account_name in item for item in notification_content):
+				if not any(masked_name in item for item in notification_content):
 					notification_content.append(account_result)
 
 	# 保存当前余额hash
