@@ -307,6 +307,7 @@ async def main():
 	success_count = 0
 	total_count = len(accounts)
 	notification_content = []
+	notified_accounts = set()  # 已添加到通知的账号 key
 	current_balances = {}
 	need_notify = False  # 是否需要发送通知
 	balance_changed = False  # 余额是否有变化
@@ -346,6 +347,7 @@ async def main():
 				elif user_info:
 					account_result += f'\n{user_info.get("error", "Unknown error")}'
 				notification_content.append(account_result)
+				notified_accounts.add(account_key)
 
 		except Exception as e:
 			account_name = get_account_display_name(account, i)
@@ -353,6 +355,7 @@ async def main():
 			print(f'[FAILED] {masked_name} processing exception: {e}')
 			need_notify = True  # 异常也需要通知
 			notification_content.append(f'[FAIL] {masked_name} exception: {str(e)[:50]}...')
+			notified_accounts.add(account_key)
 
 	# 检查余额变化
 	current_balance_hash = generate_balance_hash(current_balances) if current_balances else None
@@ -378,10 +381,9 @@ async def main():
 				account_name = get_account_display_name(account, i)
 				masked_name = mask_sensitive_info(account_name)
 				# 只添加成功获取余额的账号，且避免重复添加
-				account_result = f'[BALANCE] {masked_name}'
-				account_result += f'\n:money: Current balance: ${current_balances[account_key]["quota"]}, Used: ${current_balances[account_key]["used"]}'
-				# 检查是否已经在通知内容中（避免重复）
-				if not any(masked_name in item for item in notification_content):
+				if account_key not in notified_accounts:
+					account_result = f'[BALANCE] {masked_name}'
+					account_result += f'\n:money: Current balance: ${current_balances[account_key]["quota"]}, Used: ${current_balances[account_key]["used"]}'
 					notification_content.append(account_result)
 
 	# 保存当前余额hash
