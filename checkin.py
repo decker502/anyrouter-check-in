@@ -3,6 +3,7 @@
 AnyRouter.top 自动签到脚本
 """
 
+import argparse
 import asyncio
 import hashlib
 import json
@@ -20,15 +21,26 @@ from notify import notify
 BALANCE_HASH_FILE = 'balance_hash.txt'
 
 
-def load_accounts():
-	"""从环境变量加载多账号配置（支持多站点）"""
+def load_accounts(provider_filter: str | None = None):
+	"""从环境变量加载多账号配置（支持多站点）
+
+	Args:
+		provider_filter: 可选，'anyrouter' 或 'agentrouter' 时仅加载该站点的账号
+	"""
 	site_configs = [
-		('ANYROUTER_ACCOUNTS', 'anyrouter.top'),
-		('AGENTROUTER_ACCOUNTS', 'agentrouter.org'),
+		('ANYROUTER_ACCOUNTS', 'anyrouter.top', 'anyrouter'),
+		('AGENTROUTER_ACCOUNTS', 'agentrouter.org', 'agentrouter'),
 	]
 
+	# 按 provider 过滤
+	if provider_filter:
+		site_configs = [(ev, site, name) for ev, site, name in site_configs if name == provider_filter]
+		if not site_configs:
+			print(f"ERROR: Unknown provider '{provider_filter}', use 'anyrouter' or 'agentrouter'")
+			return None
+
 	all_accounts = []
-	for env_var, site in site_configs:
+	for env_var, site, _ in site_configs:
 		accounts_str = os.getenv(env_var)
 		if not accounts_str:
 			continue
@@ -222,8 +234,20 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 					except Exception as e:
 						print(f'[WARN] {masked_name}: Failed to parse user info: {str(e)[:50]}')
 
-				# 步骤5：使用浏览器的 fetch API 执行签到
-				print(f'[NETWORK] {masked_name}: Executing check-in')
+				# AgentRouter 与 AnyRouter 签到逻辑不同：
+				# - AgentRouter: 查询用户信息时自动完成签到，无需调用 sign_in 接口
+				# - AnyRouter: 需要调用 /api/user/sign_in 接口完成签到
+				if site == 'agentrouter.org':
+					await context.close()
+					if user_info and user_info.get('success'):
+						print(f'[SUCCESS] {masked_name}: Check-in completed (AgentRouter auto check-in on user info request)')
+						return True, user_info
+					else:
+						print(f'[FAILED] {masked_name}: Failed to get user info')
+						return False, user_info
+
+				# AnyRouter: 步骤5 调用 sign_in 接口执行签到
+				print(f'[NETWORK] {masked_name}: Executing check-in (sign_in)')
 				checkin_result = await page.evaluate(f"""
 					async () => {{
 						try {{
@@ -248,7 +272,7 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 
 				await context.close()
 
-				# 处理签到结果
+				# 处理 AnyRouter 签到结果
 				if checkin_result.get('success'):
 					try:
 						result = json.loads(checkin_result['text'])
@@ -257,6 +281,10 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 							return True, user_info
 						else:
 							error_msg = result.get('msg', result.get('message', 'Unknown error'))
+							# 已签到过也算成功
+							if any(kw in str(error_msg).lower() for kw in ['已签到', '已经签到', '重复签到', 'already checked', 'already signed']):
+								print(f'[SUCCESS] {masked_name}: Already checked in today')
+								return True, user_info
 							print(f'[FAILED] {masked_name}: Check-in failed - {error_msg}')
 							return False, user_info
 					except json.JSONDecodeError:
@@ -273,13 +301,31 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 					return False, user_info
 
 			except Exception as e:
-				print(f'[FAILED] {masked_name}: Error during check-in: {str(e)[:100]}')
 				await context.close()
+				# 可重试的临时性错误向上抛出，由 check_in_account 重试
+				if _is_retryable_error(str(e)):
+					raise
+				print(f'[FAILED] {masked_name}: Error during check-in: {str(e)[:100]}')
 				return False, None
 
 
+def _is_retryable_error(error_msg: str) -> bool:
+	"""判断是否为可重试的临时性错误"""
+	lower = str(error_msg).lower()
+	return any(
+		kw in lower
+		for kw in [
+			'timeout',
+			'err_http_response_code',
+			'err_connection',
+			'err_network',
+			'net::err',
+		]
+	)
+
+
 async def check_in_account(account_info, account_index):
-	"""为单个账号执行签到操作"""
+	"""为单个账号执行签到操作（含失败重试）"""
 	account_name = get_account_display_name(account_info, account_index)
 	masked_name = mask_sensitive_info(account_name)
 	print(f'\n[PROCESSING] Starting to process {masked_name}')
@@ -299,22 +345,79 @@ async def check_in_account(account_info, account_index):
 		print(f'[FAILED] {masked_name}: Invalid configuration format')
 		return False, None
 
-	# 使用 Playwright 执行完整的签到流程
-	return await check_in_with_playwright(account_name, user_cookies, api_user, site)
+	max_retries = 2  # 最多重试 2 次（共 3 次尝试）
+	retry_delay = 10  # 重试间隔（秒）
+	last_error = None
+
+	for attempt in range(max_retries + 1):
+		try:
+			success, user_info = await check_in_with_playwright(account_name, user_cookies, api_user, site)
+			if success:
+				return True, user_info
+			# 非异常返回的失败（如 API 返回错误），不重试
+			return False, user_info
+		except Exception as e:
+			last_error = e
+			if attempt < max_retries and _is_retryable_error(str(e)):
+				print(f'[RETRY] {masked_name}: Attempt {attempt + 1} failed, retrying in {retry_delay}s... ({str(e)[:80]})')
+				await asyncio.sleep(retry_delay)
+			else:
+				print(f'[FAILED] {masked_name}: Error during check-in: {str(e)[:100]}')
+				return False, None
+
+	print(f'[FAILED] {masked_name}: Error during check-in: {str(last_error)[:100]}')
+	return False, None
 
 
-async def main():
+def parse_args():
+	"""解析命令行参数"""
+	parser = argparse.ArgumentParser(
+		description='AnyRouter/AgentRouter 多账号自动签到',
+		formatter_class=argparse.RawDescriptionHelpFormatter,
+		epilog='''
+示例:
+  uv run checkin.py                          # 全部账号
+  uv run checkin.py --provider agentrouter    # 仅 agentrouter 的账号
+  uv run checkin.py --provider anyrouter --index 1   # 仅 anyrouter 第 1 个账号
+  uv run checkin.py --index 3                # 全部账号中的第 3 个（按 anyrouter 先、agentrouter 后）
+		''',
+	)
+	parser.add_argument(
+		'--provider',
+		choices=['anyrouter', 'agentrouter'],
+		help='仅测试指定提供商的账号',
+	)
+	parser.add_argument(
+		'--index',
+		type=int,
+		metavar='N',
+		help='仅测试第 N 个账号（从 1 开始），可与 --provider 组合使用',
+	)
+	return parser.parse_args()
+
+
+async def main(args=None):
 	"""主函数"""
+	args = args or parse_args()
+
 	print('[SYSTEM] Multi-site multi-account auto check-in script started (using Playwright)')
 	print(f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
 
 	# 加载账号配置
-	accounts = load_accounts()
+	accounts = load_accounts(provider_filter=args.provider)
 	if not accounts:
 		print('[FAILED] Unable to load account configuration, program exits')
 		sys.exit(1)
 
-	print(f'[INFO] Found {len(accounts)} account configurations')
+	# 按 index 过滤
+	if args.index is not None:
+		if args.index < 1 or args.index > len(accounts):
+			print(f'[FAILED] Index must be 1-{len(accounts)}, got {args.index}')
+			sys.exit(1)
+		accounts = [accounts[args.index - 1]]
+		print(f'[INFO] Testing single account: index {args.index} ({get_account_display_name(accounts[0], args.index - 1)})')
+	else:
+		print(f'[INFO] Found {len(accounts)} account configurations')
 
 	# 加载余额hash
 	last_balance_hash = load_balance_hash()
@@ -417,9 +520,11 @@ async def main():
 
 			notification_content.append(account_result)
 
-	# 保存当前余额hash
-	if current_balance_hash:
+	# 保存当前余额hash（测试模式下跳过，避免影响后续完整运行的余额检测）
+	if current_balance_hash and not (args.provider or args.index):
 		save_balance_hash(current_balance_hash)
+
+	test_mode = args.provider is not None or args.index is not None
 
 	if need_notify and notification_content:
 		# 构建通知内容
@@ -441,8 +546,11 @@ async def main():
 		notify_content = '\n\n'.join([time_info, '\n'.join(notification_content), '\n'.join(summary)])
 
 		print(notify_content)
-		notify.push_message('AnyRouter Check-in Alert', notify_content, msg_type='text')
-		print('[NOTIFY] Notification sent due to failures or balance changes')
+		if not test_mode:
+			notify.push_message('AnyRouter Check-in Alert', notify_content, msg_type='text')
+			print('[NOTIFY] Notification sent due to failures or balance changes')
+		else:
+			print('[INFO] Test mode: notification skipped')
 	else:
 		print('[INFO] All accounts successful and no balance changes detected, notification skipped')
 
