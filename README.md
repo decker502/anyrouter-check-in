@@ -1,14 +1,15 @@
-# Any Router 多账号自动签到
+# AnyRouter / AgentRouter 多账号自动签到
 
 推荐搭配使用[Auo](https://github.com/millylee/auo)，支持任意 Claude Code Token 切换的工具。
 
 **维护开源不易，如果本项目帮助到了你，请帮忙点个 Star，谢谢!**
 
-用于 Claude Code 中转站 Any Router 多账号每日签到，一次 $25，限时注册即送 100 美金，[点击这里注册](https://anyrouter.top/register?aff=gSsN)。业界良心，支持 Claude Sonnet 4.5、GPT-5-Codex、Claude Code 百万上下文（使用 `/model sonnet[1m]` 开启），`gemini-2.5-pro` 模型。
+同时支持 [AnyRouter](https://anyrouter.top/register?aff=gSsN) 和 [AgentRouter](https://agentrouter.org/register?aff=CONH) 两个 Claude Code 中转站的多账号每日签到，一次 $25，限时注册即送 100 美金。业界良心，支持 Claude Sonnet 4.5、GPT-5-Codex、Claude Code 百万上下文（使用 `/model sonnet[1m]` 开启），`gemini-2.5-pro` 模型。
 
 ## 功能特性
 
 - ✅ 单个/多账号自动签到
+- ✅ 同时支持 anyrouter.top 和 agentrouter.org 两个站点
 - ✅ 多种机器人通知（可选）
 - ✅ 绕过 WAF 限制
 
@@ -25,7 +26,7 @@
 2. **API User**: 用于请求头的 new-api-user 参数
 
 #### 获取 Cookies：
-1. 打开浏览器，访问 https://anyrouter.top/
+1. 打开浏览器，访问对应站点（https://anyrouter.top/ 或 https://agentrouter.org/）
 2. 登录你的账户
 3. 打开开发者工具 (F12)
 4. 切换到 "Application" 或 "存储" 选项卡
@@ -43,11 +44,13 @@
 4. 点击新建的 `production` 环境进入环境配置页
 5. 点击 "Add environment secret" 创建 secret：
    - Name: `ANYROUTER_ACCOUNTS`
-   - Value: 你的多账号配置数据
+   - Value: 你的 anyrouter.top 多账号配置数据
+   - （可选）Name: `AGENTROUTER_ACCOUNTS`
+   - （可选）Value: 你的 agentrouter.org 多账号配置数据
 
 ### 4. 多账号配置格式
 
-支持单个与多个账号配置，可选 `name` 字段用于自定义账号显示名称：
+支持单个与多个账号配置，可选 `name` 字段用于自定义账号显示名称。`ANYROUTER_ACCOUNTS` 和 `AGENTROUTER_ACCOUNTS` 格式完全一致：
 
 ```json
 [
@@ -104,7 +107,8 @@
 
 ## 执行时间
 
-- 脚本每6小时执行一次（1. action 无法准确触发，基本延时 1~1.5h；2. 目前观测到 anyrouter 的签到是每 24h 而不是零点就可签到）
+- 脚本每6小时执行一次（1. action 无法准确触发，基本延时 1~1.5h；2. 目前观测到签到是每 24h 而不是零点就可签到）
+- 两个站点的账号在同一次执行中依次签到
 - 你也可以随时手动触发签到
 
 ## 注意事项
@@ -112,6 +116,7 @@
 - 请确保每个账号的 cookies 和 API User 都是正确的
 - 可以在 Actions 页面查看详细的运行日志
 - 支持部分账号失败，只要有账号成功签到，整个任务就不会失败
+- 只配置 `ANYROUTER_ACCOUNTS` 也能正常运行，`AGENTROUTER_ACCOUNTS` 为可选项
 - 报 401 错误，请重新获取 cookies，理论 1 个月失效，但有 Bug，详见 [#6](https://github.com/millylee/anyrouter-check-in/issues/6)
 - 请求 200，但出现 Error 1040（08004）：Too many connections，官方数据库问题，目前已修复，但遇到几次了，详见 [#7](https://github.com/millylee/anyrouter-check-in/issues/7)
 
@@ -170,15 +175,20 @@
 Session cookie 每月会失效（报 401 错误）。本项目提供一个本地辅助脚本，简化 session 刷新流程：
 
 ```bash
+# 刷新所有站点
 uv run refresh_session.py
+
+# 只刷新指定站点
+uv run refresh_session.py anyrouter
+uv run refresh_session.py agentrouter
 ```
 
-脚本会打开一个持久化浏览器窗口，逐个账号操作：
-1. 读取 `.env` 中的账号配置
-2. 导航到 anyrouter 登录页，用户手动完成 GitHub 登录
+脚本会打开一个持久化浏览器窗口，逐个站点、逐个账号操作：
+1. 读取 `.env` 中的 `ANYROUTER_ACCOUNTS` 和 `AGENTROUTER_ACCOUNTS` 配置
+2. 导航到对应站点登录页，用户手动完成 GitHub 登录
 3. 自动提取新的 session cookie 和 api_user
-4. 更新本地 `.env` 文件
-5. 可选：通过 `gh` CLI 自动更新 GitHub Secret
+4. 分别更新本地 `.env` 文件中的两个变量
+5. 可选：通过 `gh` CLI 分别更新两个 GitHub Secret
 
 浏览器配置保存在 `.browser_profile/` 目录，**首次运行**需要完整登录 GitHub，后续运行 GitHub 登录状态自动保留，只需点击「Login with GitHub」即可。
 

@@ -21,37 +21,52 @@ BALANCE_HASH_FILE = 'balance_hash.txt'
 
 
 def load_accounts():
-	"""从环境变量加载多账号配置"""
-	accounts_str = os.getenv('ANYROUTER_ACCOUNTS')
-	if not accounts_str:
-		print('ERROR: ANYROUTER_ACCOUNTS environment variable not found')
+	"""从环境变量加载多账号配置（支持多站点）"""
+	site_configs = [
+		('ANYROUTER_ACCOUNTS', 'anyrouter.top'),
+		('AGENTROUTER_ACCOUNTS', 'agentrouter.org'),
+	]
+
+	all_accounts = []
+	for env_var, site in site_configs:
+		accounts_str = os.getenv(env_var)
+		if not accounts_str:
+			continue
+
+		try:
+			accounts_data = json.loads(accounts_str)
+
+			if not isinstance(accounts_data, list):
+				print(f'ERROR: {env_var} must use array format [{{}}]')
+				continue
+
+			valid = True
+			for i, account in enumerate(accounts_data):
+				if not isinstance(account, dict):
+					print(f'ERROR: {env_var} account {i + 1} configuration format is incorrect')
+					valid = False
+					break
+				if 'cookies' not in account or 'api_user' not in account:
+					print(f'ERROR: {env_var} account {i + 1} missing required fields (cookies, api_user)')
+					valid = False
+					break
+				if 'name' in account and not account['name']:
+					print(f'ERROR: {env_var} account {i + 1} name field cannot be empty')
+					valid = False
+					break
+
+			if valid:
+				for account in accounts_data:
+					account['_site'] = site
+					all_accounts.append(account)
+		except Exception as e:
+			print(f'ERROR: {env_var} configuration format is incorrect: {e}')
+
+	if not all_accounts:
+		print('ERROR: No valid account configuration found (check ANYROUTER_ACCOUNTS or AGENTROUTER_ACCOUNTS)')
 		return None
 
-	try:
-		accounts_data = json.loads(accounts_str)
-
-		# 检查是否为数组格式
-		if not isinstance(accounts_data, list):
-			print('ERROR: Account configuration must use array format [{}]')
-			return None
-
-		# 验证账号数据格式
-		for i, account in enumerate(accounts_data):
-			if not isinstance(account, dict):
-				print(f'ERROR: Account {i + 1} configuration format is incorrect')
-				return None
-			if 'cookies' not in account or 'api_user' not in account:
-				print(f'ERROR: Account {i + 1} missing required fields (cookies, api_user)')
-				return None
-			# 如果有 name 字段，确保它不是空字符串
-			if 'name' in account and not account['name']:
-				print(f'ERROR: Account {i + 1} name field cannot be empty')
-				return None
-
-		return accounts_data
-	except Exception as e:
-		print(f'ERROR: Account configuration format is incorrect: {e}')
-		return None
+	return all_accounts
 
 
 def load_balance_hash():
@@ -109,7 +124,7 @@ def parse_cookies(cookies_data):
 	return {}
 
 
-async def check_in_with_playwright(account_name: str, user_cookies: dict, api_user: str):
+async def check_in_with_playwright(account_name: str, user_cookies: dict, api_user: str, site: str = 'anyrouter.top'):
 	"""使用 Playwright 执行完整的签到流程"""
 	masked_name = mask_sensitive_info(account_name)
 	print(f'[PROCESSING] {masked_name}: Starting browser for check-in...')
@@ -144,7 +159,7 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 			try:
 				# 步骤1：访问登录页面获取 WAF cookies
 				print(f'[PROCESSING] {masked_name}: Accessing login page to get WAF cookies...')
-				await page.goto('https://anyrouter.top/login', wait_until='networkidle')
+				await page.goto(f'https://{site}/login', wait_until='networkidle')
 
 				try:
 					await page.wait_for_function('document.readyState === "complete"', timeout=5000)
@@ -158,14 +173,14 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 					cookie_list.append({
 						'name': name,
 						'value': value,
-						'domain': 'anyrouter.top',
+						'domain': site,
 						'path': '/',
 					})
 				await context.add_cookies(cookie_list)
 
 				# 步骤3：访问控制台页面确保登录状态
 				print(f'[PROCESSING] {masked_name}: Accessing console page...')
-				await page.goto('https://anyrouter.top/console', wait_until='networkidle')
+				await page.goto(f'https://{site}/console', wait_until='networkidle')
 				await page.wait_for_timeout(2000)
 
 				# 步骤4：使用浏览器的 fetch API 获取用户信息
@@ -173,7 +188,7 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 				user_info_result = await page.evaluate(f"""
 					async () => {{
 						try {{
-							const response = await fetch('https://anyrouter.top/api/user/self', {{
+							const response = await fetch('https://{site}/api/user/self', {{
 								method: 'GET',
 								headers: {{
 									'Accept': 'application/json, text/plain, */*',
@@ -212,7 +227,7 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 				checkin_result = await page.evaluate(f"""
 					async () => {{
 						try {{
-							const response = await fetch('https://anyrouter.top/api/user/sign_in', {{
+							const response = await fetch('https://{site}/api/user/sign_in', {{
 								method: 'POST',
 								headers: {{
 									'Accept': 'application/json, text/plain, */*',
@@ -272,6 +287,7 @@ async def check_in_account(account_info, account_index):
 	# 解析账号配置
 	cookies_data = account_info.get('cookies', {})
 	api_user = account_info.get('api_user', '')
+	site = account_info.get('_site', 'anyrouter.top')
 
 	if not api_user:
 		print(f'[FAILED] {masked_name}: API user identifier not found')
@@ -284,12 +300,12 @@ async def check_in_account(account_info, account_index):
 		return False, None
 
 	# 使用 Playwright 执行完整的签到流程
-	return await check_in_with_playwright(account_name, user_cookies, api_user)
+	return await check_in_with_playwright(account_name, user_cookies, api_user, site)
 
 
 async def main():
 	"""主函数"""
-	print('[SYSTEM] AnyRouter.top multi-account auto check-in script started (using Playwright)')
+	print('[SYSTEM] Multi-site multi-account auto check-in script started (using Playwright)')
 	print(f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
 
 	# 加载账号配置
@@ -340,8 +356,9 @@ async def main():
 			if should_notify_this_account:
 				account_name = get_account_display_name(account, i)
 				masked_name = mask_sensitive_info(account_name)
+				site = account.get('_site', 'anyrouter.top')
 				status = '[SUCCESS]' if success else '[FAIL]'
-				account_result = f'{status} {masked_name}'
+				account_result = f'{status} [{site}] {masked_name}'
 				if user_info and user_info.get('success'):
 					account_result += f'\n{user_info["display"]}'
 				elif user_info:
@@ -380,9 +397,10 @@ async def main():
 			if account_key in current_balances:
 				account_name = get_account_display_name(account, i)
 				masked_name = mask_sensitive_info(account_name)
+				site = account.get('_site', 'anyrouter.top')
 				# 只添加成功获取余额的账号，且避免重复添加
 				if account_key not in notified_accounts:
-					account_result = f'[BALANCE] {masked_name}'
+					account_result = f'[BALANCE] [{site}] {masked_name}'
 					account_result += f'\n:money: Current balance: ${current_balances[account_key]["quota"]}, Used: ${current_balances[account_key]["used"]}'
 					notification_content.append(account_result)
 

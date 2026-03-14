@@ -25,10 +25,15 @@ load_dotenv()
 BROWSER_PROFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.browser_profile')
 ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
 
+SITE_CONFIGS = [
+	('ANYROUTER_ACCOUNTS', 'anyrouter.top'),
+	('AGENTROUTER_ACCOUNTS', 'agentrouter.org'),
+]
 
-def load_existing_accounts() -> list | None:
+
+def load_existing_accounts(env_var: str = 'ANYROUTER_ACCOUNTS') -> list | None:
 	"""从 .env 文件读取现有账号配置"""
-	accounts_str = os.getenv('ANYROUTER_ACCOUNTS')
+	accounts_str = os.getenv(env_var)
 	if not accounts_str:
 		return None
 	try:
@@ -45,14 +50,14 @@ def get_account_display_name(account: dict, index: int) -> str:
 	return account.get('name', account.get('api_user', f'Account {index + 1}'))
 
 
-async def clear_anyrouter_cookies(context):
-	"""清除 anyrouter 的 cookies，保留其他网站（如 GitHub）的登录状态"""
+async def clear_site_cookies(context, site: str = 'anyrouter.top'):
+	"""清除指定站点的 cookies，保留其他网站（如 GitHub）的登录状态"""
 	try:
-		await context.clear_cookies(domain='anyrouter.top')
+		await context.clear_cookies(domain=site)
 	except TypeError:
 		all_cookies = await context.cookies()
 		await context.clear_cookies()
-		keep = [c for c in all_cookies if 'anyrouter' not in c.get('domain', '')]
+		keep = [c for c in all_cookies if site not in c.get('domain', '')]
 		if keep:
 			await context.add_cookies(keep)
 
@@ -74,23 +79,23 @@ async def ensure_page(context, page):
 	return await context.new_page()
 
 
-async def refresh_single_account(context, page, account: dict, index: int, total: int) -> tuple[dict | None, any]:
+async def refresh_single_account(context, page, account: dict, index: int, total: int, site: str = 'anyrouter.top') -> tuple[dict | None, any]:
 	"""在浏览器中刷新单个账号的 session
 
 	返回 (新账号配置, 当前page)，page 可能因重建而改变。
 	"""
 	display_name = get_account_display_name(account, index)
-	print(f'\n--- 刷新账号 {index + 1}/{total}: {display_name} ---')
+	print(f'\n--- 刷新账号 {index + 1}/{total} ({site}): {display_name} ---')
 
 	try:
 		page = await ensure_page(context, page)
 
-		# 清除 anyrouter 的 cookies（保留 GitHub 登录状态）
-		await clear_anyrouter_cookies(context)
+		# 清除站点的 cookies（保留 GitHub 登录状态）
+		await clear_site_cookies(context, site)
 
 		# 导航到登录页面（不限超时，等用户操作）
 		print('正在导航到登录页面...')
-		await page.goto('https://anyrouter.top/login', wait_until='networkidle', timeout=0)
+		await page.goto(f'https://{site}/login', wait_until='networkidle', timeout=0)
 
 		# 等待 WAF 通过
 		try:
@@ -142,12 +147,12 @@ async def refresh_single_account(context, page, account: dict, index: int, total
 		await page.wait_for_timeout(2000)
 
 		# 确保在正确的域名页面上
-		if 'anyrouter.top' not in page.url:
-			await page.goto('https://anyrouter.top/console', wait_until='networkidle', timeout=0)
+		if site not in page.url:
+			await page.goto(f'https://{site}/console', wait_until='networkidle', timeout=0)
 			await page.wait_for_timeout(2000)
 
 		# 提取 session cookie
-		cookies = await context.cookies('https://anyrouter.top')
+		cookies = await context.cookies(f'https://{site}')
 		session_cookie = next((c for c in cookies if c['name'] == 'session'), None)
 
 		if not session_cookie:
@@ -202,35 +207,35 @@ async def refresh_single_account(context, page, account: dict, index: int, total
 		return None, page
 
 
-def update_env_file(new_accounts_json: str):
-	"""更新 .env 文件中的 ANYROUTER_ACCOUNTS"""
+def update_env_file(env_var: str, new_accounts_json: str):
+	"""更新 .env 文件中的指定环境变量"""
 	env_path = Path(ENV_FILE)
 
 	if not env_path.exists():
-		env_path.write_text(f'ANYROUTER_ACCOUNTS={new_accounts_json}\n', encoding='utf-8')
+		env_path.write_text(f'{env_var}={new_accounts_json}\n', encoding='utf-8')
 		return
 
 	lines = env_path.read_text(encoding='utf-8').splitlines(keepends=True)
 	new_lines = []
 	found = False
 	for line in lines:
-		if line.startswith('ANYROUTER_ACCOUNTS='):
-			new_lines.append(f'ANYROUTER_ACCOUNTS={new_accounts_json}\n')
+		if line.startswith(f'{env_var}='):
+			new_lines.append(f'{env_var}={new_accounts_json}\n')
 			found = True
 		else:
 			new_lines.append(line)
 
 	if not found:
-		new_lines.append(f'ANYROUTER_ACCOUNTS={new_accounts_json}\n')
+		new_lines.append(f'{env_var}={new_accounts_json}\n')
 
 	env_path.write_text(''.join(new_lines), encoding='utf-8')
 
 
-def update_github_secret(new_accounts_json: str) -> bool:
+def update_github_secret(secret_name: str, new_accounts_json: str) -> bool:
 	"""使用 gh CLI 更新 GitHub Secret"""
 	try:
 		result = subprocess.run(
-			['gh', 'secret', 'set', 'ANYROUTER_ACCOUNTS', '--env', 'production', '--body', new_accounts_json],
+			['gh', 'secret', 'set', secret_name, '--env', 'production', '--body', new_accounts_json],
 			capture_output=True,
 			text=True,
 			timeout=30,
@@ -249,17 +254,38 @@ def update_github_secret(new_accounts_json: str) -> bool:
 
 
 async def main():
+	# 解析命令行参数
+	site_filter = None
+	if len(sys.argv) > 1:
+		arg = sys.argv[1].lower()
+		match = [s for env_var, s in SITE_CONFIGS if arg in s or arg in env_var.lower()]
+		if match:
+			site_filter = match[0]
+		else:
+			print(f'❌ 未知站点: {arg}')
+			print(f'可选: {", ".join(s for _, s in SITE_CONFIGS)}')
+			sys.exit(1)
+
 	print()
-	print('=== AnyRouter Session 刷新工具 ===')
+	print('=== Session 刷新工具（支持多站点）===')
+	if site_filter:
+		print(f'    仅刷新: {site_filter}')
 	print()
 
-	# 读取现有账号配置
-	accounts = load_existing_accounts()
-	if not accounts:
-		print('❌ 未找到账号配置，请确保 .env 文件中包含 ANYROUTER_ACCOUNTS')
+	# 筛选站点配置
+	configs = [(ev, s) for ev, s in SITE_CONFIGS if site_filter is None or s == site_filter]
+
+	# 读取账号配置
+	sites_to_process = []
+	for env_var, site in configs:
+		accounts = load_existing_accounts(env_var)
+		if accounts:
+			sites_to_process.append((env_var, site, accounts))
+			print(f'找到 {site} 的 {len(accounts)} 个账号配置')
+
+	if not sites_to_process:
+		print('❌ 未找到任何账号配置，请确保 .env 文件中包含 ANYROUTER_ACCOUNTS 或 AGENTROUTER_ACCOUNTS')
 		sys.exit(1)
-
-	print(f'找到 {len(accounts)} 个账号配置')
 
 	# 确保浏览器配置目录存在
 	os.makedirs(BROWSER_PROFILE_DIR, exist_ok=True)
@@ -290,36 +316,50 @@ async def main():
 
 		page = context.pages[0] if context.pages else await context.new_page()
 
-		# 逐个刷新账号（复用同一个浏览器窗口）
-		new_accounts = []
-		success_count = 0
+		# 收集各站点的刷新结果
+		site_results = []
 
-		for i, account in enumerate(accounts):
-			result, page = await refresh_single_account(context, page, account, i, len(accounts))
-			if result:
-				new_accounts.append(result)
-				success_count += 1
-			else:
-				print(f'⚠️  保留账号 {i + 1} 的原有配置')
-				new_accounts.append(account)
+		for env_var, site, accounts in sites_to_process:
+			print(f'\n{"=" * 40}')
+			print(f'  处理站点: {site} ({len(accounts)} 个账号)')
+			print(f'{"=" * 40}')
+
+			new_accounts = []
+			success_count = 0
+
+			for i, account in enumerate(accounts):
+				result, page = await refresh_single_account(context, page, account, i, len(accounts), site)
+				if result:
+					new_accounts.append(result)
+					success_count += 1
+				else:
+					print(f'⚠️  保留账号 {i + 1} 的原有配置')
+					new_accounts.append(account)
+
+			site_results.append((env_var, site, accounts, new_accounts, success_count))
 
 		await context.close()
 
-	# 汇总
+	# 汇总并保存
 	print()
 	print('=== 全部完成 ===')
-	print(f'✅ 成功: {success_count}/{len(accounts)}')
 
-	if success_count == 0:
+	has_success = False
+	for env_var, site, accounts, new_accounts, success_count in site_results:
+		print(f'{site}: ✅ 成功 {success_count}/{len(accounts)}')
+		if success_count > 0:
+			has_success = True
+
+	if not has_success:
 		print('❌ 没有账号刷新成功，不更新配置')
 		sys.exit(1)
 
-	# 生成新的 JSON 配置
-	new_accounts_json = json.dumps(new_accounts, ensure_ascii=False, separators=(',', ':'))
-
-	# 更新本地 .env 文件
-	update_env_file(new_accounts_json)
-	print('已更新本地 .env 文件')
+	# 更新本地 .env 文件（每个站点分别更新）
+	for env_var, site, accounts, new_accounts, success_count in site_results:
+		if success_count > 0:
+			new_accounts_json = json.dumps(new_accounts, ensure_ascii=False, separators=(',', ':'))
+			update_env_file(env_var, new_accounts_json)
+			print(f'已更新本地 .env 文件: {env_var}')
 
 	# 可选：更新 GitHub Secret
 	print()
@@ -329,12 +369,15 @@ async def main():
 		answer = 'n'
 
 	if answer == 'y':
-		print('正在更新 GitHub Secret...')
-		if update_github_secret(new_accounts_json):
-			print('✅ GitHub Secret 已更新！')
-		else:
-			print('❌ GitHub Secret 更新失败，请手动更新')
-			print(f"   gh secret set ANYROUTER_ACCOUNTS --env production --body '{new_accounts_json}'")
+		for env_var, site, accounts, new_accounts, success_count in site_results:
+			if success_count > 0:
+				new_accounts_json = json.dumps(new_accounts, ensure_ascii=False, separators=(',', ':'))
+				print(f'正在更新 GitHub Secret: {env_var}...')
+				if update_github_secret(env_var, new_accounts_json):
+					print(f'✅ {env_var} GitHub Secret 已更新！')
+				else:
+					print(f'❌ {env_var} GitHub Secret 更新失败，请手动更新')
+					print(f"   gh secret set {env_var} --env production --body '{new_accounts_json}'")
 
 
 if __name__ == '__main__':

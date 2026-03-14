@@ -1,6 +1,6 @@
 # Session 刷新操作手册
 
-AnyRouter 使用 GitHub OAuth 登录，session cookie 约 1 个月失效（报 401 错误）。本文档记录完整的 session 刷新流程。
+AnyRouter (anyrouter.top) 和 AgentRouter (agentrouter.org) 均使用 GitHub OAuth 登录，session cookie 约 1 个月失效（报 401 错误）。刷新脚本同时支持两个站点，本文档记录完整的 session 刷新流程。
 
 ## 前置准备（仅首次）
 
@@ -40,17 +40,24 @@ gh auth refresh -s admin:org
 ### 步骤 1：运行刷新脚本
 
 ```bash
+# 刷新所有站点
 uv run refresh_session.py
+
+# 只刷新 anyrouter.top
+uv run refresh_session.py anyrouter
+
+# 只刷新 agentrouter.org
+uv run refresh_session.py agentrouter
 ```
 
 脚本会：
-1. 读取 `.env` 中的 `ANYROUTER_ACCOUNTS` 配置
+1. 读取 `.env` 中的 `ANYROUTER_ACCOUNTS` 和 `AGENTROUTER_ACCOUNTS` 配置
 2. 启动一个 Chrome 浏览器窗口（使用 `.browser_profile/` 持久化配置）
-3. 逐个账号导航到 anyrouter 登录页
+3. 按站点分组，逐个账号导航到对应站点的登录页
 
 ### 步骤 2：在浏览器中完成登录
 
-对每个账号，脚本会打开 `anyrouter.top/login` 页面：
+对每个账号，脚本会打开对应站点（`anyrouter.top/login` 或 `agentrouter.org/login`）的登录页面：
 
 - **首次运行**：需要完整登录 GitHub（输入用户名、密码、2FA）
 - **后续运行**：GitHub 登录状态已保留在 `.browser_profile/` 中，只需点击「Login with GitHub」
@@ -70,7 +77,7 @@ uv run refresh_session.py
    Session: MTc3MzQ2...pz0k7w==
 ```
 
-全部完成后，脚本会自动更新本地 `.env` 文件。
+全部完成后，脚本会分别更新本地 `.env` 文件中的 `ANYROUTER_ACCOUNTS` 和 `AGENTROUTER_ACCOUNTS`。
 
 ### 步骤 4：更新 GitHub Secret
 
@@ -80,7 +87,7 @@ uv run refresh_session.py
 是否更新 GitHub Secret? [y/N]: y
 ```
 
-输入 `y` 会通过 `gh secret set` 自动更新 `production` 环境的 Secret。
+输入 `y` 会通过 `gh secret set` 分别更新 `production` 环境中的 `ANYROUTER_ACCOUNTS` 和 `AGENTROUTER_ACCOUNTS` Secret。
 
 #### 如果自动更新失败
 
@@ -94,6 +101,7 @@ gh auth switch
 
 ```bash
 gh secret set ANYROUTER_ACCOUNTS --env production < <(grep '^ANYROUTER_ACCOUNTS=' .env | cut -d= -f2-)
+gh secret set AGENTROUTER_ACCOUNTS --env production < <(grep '^AGENTROUTER_ACCOUNTS=' .env | cut -d= -f2-)
 ```
 
 ### 步骤 5：验证
