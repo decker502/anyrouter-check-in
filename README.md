@@ -165,6 +165,23 @@
 2. 每个通知方式都是独立的，可以只配置你需要的推送方式
 3. 如果某个通知方式配置不正确或未配置，脚本会自动跳过该通知方式
 
+## Session 刷新
+
+Session cookie 每月会失效（报 401 错误）。本项目提供一个本地辅助脚本，简化 session 刷新流程：
+
+```bash
+uv run refresh_session.py
+```
+
+脚本会打开一个持久化浏览器窗口，逐个账号操作：
+1. 读取 `.env` 中的账号配置
+2. 导航到 anyrouter 登录页，用户手动完成 GitHub 登录
+3. 自动提取新的 session cookie 和 api_user
+4. 更新本地 `.env` 文件
+5. 可选：通过 `gh` CLI 自动更新 GitHub Secret
+
+浏览器配置保存在 `.browser_profile/` 目录，**首次运行**需要完整登录 GitHub，后续运行 GitHub 登录状态自动保留，只需点击「Login with GitHub」即可。
+
 ## 故障排除
 
 如果签到失败，请检查：
