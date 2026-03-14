@@ -98,7 +98,7 @@ def generate_balance_hash(balances):
 
 
 def get_account_display_name(account_info, account_index):
-	"""获取账号显示名称"""
+	"""获取账号显示名称，优先使用 name 而非 id/api_user"""
 	return account_info.get('name', account_info.get('api_user', f'Account {account_index + 1}'))
 
 
@@ -319,11 +319,10 @@ async def main():
 	# 加载余额hash
 	last_balance_hash = load_balance_hash()
 
-	# 为每个账号执行签到
+	# 为每个账号执行签到，并记录每个账号的结果用于通知
 	success_count = 0
 	total_count = len(accounts)
-	notification_content = []
-	notified_accounts = set()  # 已添加到通知的账号 key
+	check_results = []  # 存储每个账号的签到结果
 	current_balances = {}
 	need_notify = False  # 是否需要发送通知
 	balance_changed = False  # 余额是否有变化
@@ -335,12 +334,8 @@ async def main():
 			if success:
 				success_count += 1
 
-			# 检查是否需要通知
-			should_notify_this_account = False
-
 			# 如果签到失败，需要通知
 			if not success:
-				should_notify_this_account = True
 				need_notify = True
 				account_name = get_account_display_name(account, i)
 				masked_name = mask_sensitive_info(account_name)
@@ -352,27 +347,26 @@ async def main():
 				current_used = user_info['used_quota']
 				current_balances[account_key] = {'quota': current_quota, 'used': current_used}
 
-			# 只有需要通知的账号才收集内容
-			if should_notify_this_account:
-				account_name = get_account_display_name(account, i)
-				masked_name = mask_sensitive_info(account_name)
-				site = account.get('_site', 'anyrouter.top')
-				status = '[SUCCESS]' if success else '[FAIL]'
-				account_result = f'{status} [{site}] {masked_name}'
-				if user_info and user_info.get('success'):
-					account_result += f'\n{user_info["display"]}'
-				elif user_info:
-					account_result += f'\n{user_info.get("error", "Unknown error")}'
-				notification_content.append(account_result)
-				notified_accounts.add(account_key)
+			# 记录本账号签到结果
+			check_results.append({
+				'account': account,
+				'index': i,
+				'success': success,
+				'user_info': user_info,
+			})
 
 		except Exception as e:
 			account_name = get_account_display_name(account, i)
 			masked_name = mask_sensitive_info(account_name)
 			print(f'[FAILED] {masked_name} processing exception: {e}')
 			need_notify = True  # 异常也需要通知
-			notification_content.append(f'[FAIL] {masked_name} exception: {str(e)[:50]}...')
-			notified_accounts.add(account_key)
+			check_results.append({
+				'account': account,
+				'index': i,
+				'success': False,
+				'user_info': None,
+				'error': str(e)[:50],
+			})
 
 	# 检查余额变化
 	current_balance_hash = generate_balance_hash(current_balances) if current_balances else None
@@ -390,19 +384,38 @@ async def main():
 		else:
 			print('[INFO] No balance changes detected')
 
-	# 为有余额变化的情况添加所有成功账号到通知内容
-	if balance_changed:
-		for i, account in enumerate(accounts):
+	# 构建通知内容：发送通知时包含所有账号（anyrouter + agentrouter）的结果
+	notification_content = []
+	if need_notify:
+		for result in check_results:
+			account = result['account']
+			i = result['index']
 			account_key = f'account_{i + 1}'
-			if account_key in current_balances:
-				account_name = get_account_display_name(account, i)
-				masked_name = mask_sensitive_info(account_name)
-				site = account.get('_site', 'anyrouter.top')
-				# 只添加成功获取余额的账号，且避免重复添加
-				if account_key not in notified_accounts:
-					account_result = f'[BALANCE] [{site}] {masked_name}'
-					account_result += f'\n:money: Current balance: ${current_balances[account_key]["quota"]}, Used: ${current_balances[account_key]["used"]}'
-					notification_content.append(account_result)
+			account_name = get_account_display_name(account, i)
+			masked_name = mask_sensitive_info(account_name)
+			site = account.get('_site', 'anyrouter.top')
+			success = result['success']
+			user_info = result.get('user_info')
+			error = result.get('error')
+
+			if success and account_key in current_balances:
+				status = '[BALANCE]'
+				account_result = f'{status} [{site}] {masked_name}'
+				account_result += f'\n:money: Current balance: ${current_balances[account_key]["quota"]}, Used: ${current_balances[account_key]["used"]}'
+			elif success:
+				status = '[SUCCESS]'
+				account_result = f'{status} [{site}] {masked_name}'
+			else:
+				status = '[FAIL]'
+				account_result = f'{status} [{site}] {masked_name}'
+				if user_info and user_info.get('success'):
+					account_result += f'\n{user_info["display"]}'
+				elif user_info:
+					account_result += f'\n{user_info.get("error", "Unknown error")}'
+				elif error:
+					account_result += f'\nexception: {error}...'
+
+			notification_content.append(account_result)
 
 	# 保存当前余额hash
 	if current_balance_hash:
