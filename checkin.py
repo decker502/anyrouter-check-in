@@ -524,8 +524,8 @@ async def main(args=None):
 		else:
 			print('[INFO] No balance changes detected')
 
-	# 构建通知内容：发送通知时包含所有账号（anyrouter + agentrouter）的结果
-	notification_content = []
+	# 构建通知内容：按 provider 分组，格式 {provider}: {name} : {balance} : {used}
+	provider_lines = {}  # site -> [line1, line2, ...]
 	if need_notify:
 		for result in check_results:
 			account = result['account']
@@ -535,27 +535,25 @@ async def main(args=None):
 			masked_name = mask_sensitive_info(account_name)
 			site = account.get('_site', 'anyrouter.top')
 			success = result['success']
-			user_info = result.get('user_info')
-			error = result.get('error')
 
 			if success and account_key in current_balances:
-				status = '[BALANCE]'
-				account_result = f'{status} [{site}] {masked_name}'
-				account_result += f'\n:money: Current balance: ${current_balances[account_key]["quota"]}, Used: ${current_balances[account_key]["used"]}'
+				quota = current_balances[account_key]['quota']
+				used = current_balances[account_key]['used']
+				line = f'{masked_name} : ${quota} : ${used}'
 			elif success:
-				status = '[SUCCESS]'
-				account_result = f'{status} [{site}] {masked_name}'
+				line = f'{masked_name} : - : -'
 			else:
-				status = '[FAIL]'
-				account_result = f'{status} [{site}] {masked_name}'
-				if user_info and user_info.get('success'):
-					account_result += f'\n{user_info["display"]}'
-				elif user_info:
-					account_result += f'\n{user_info.get("error", "Unknown error")}'
-				elif error:
-					account_result += f'\nexception: {error}...'
+				line = f'{masked_name} : 失败'
 
-			notification_content.append(account_result)
+			provider_lines.setdefault(site, []).append(line)
+
+	# 按 anyrouter 先、agentrouter 后排序
+	site_order = ['anyrouter.top', 'agentrouter.org']
+	notification_content = []
+	for site in site_order:
+		if site in provider_lines:
+			notification_content.append(f'{site}:')
+			notification_content.extend(provider_lines[site])
 
 	# 保存当前余额hash（测试模式下跳过，避免影响后续完整运行的余额检测）
 	if current_balance_hash and not (args.provider or args.index):
@@ -564,23 +562,8 @@ async def main(args=None):
 	test_mode = args.provider is not None or args.index is not None
 
 	if need_notify and notification_content:
-		# 构建通知内容
-		summary = [
-			'[STATS] Check-in result statistics:',
-			f'[SUCCESS] Success: {success_count}/{total_count}',
-			f'[FAIL] Failed: {total_count - success_count}/{total_count}',
-		]
-
-		if success_count == total_count:
-			summary.append('[SUCCESS] All accounts check-in successful!')
-		elif success_count > 0:
-			summary.append('[WARN] Some accounts check-in successful')
-		else:
-			summary.append('[ERROR] All accounts check-in failed')
-
-		time_info = f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
-
-		notify_content = '\n\n'.join([time_info, '\n'.join(notification_content), '\n'.join(summary)])
+		time_info = f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
+		notify_content = '\n'.join([time_info, ''] + notification_content)
 
 		print(notify_content)
 		if not test_mode:
