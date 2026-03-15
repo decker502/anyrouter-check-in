@@ -110,6 +110,9 @@ gh secret set AGENTROUTER_ACCOUNTS --env production < <(grep '^AGENTROUTER_ACCOU
 # 本地验证 session 有效
 uv run checkin.py
 
+# 仅验证 agentrouter 第 1 个账号
+uv run checkin.py --provider agentrouter --index 1
+
 # 或触发 GitHub Actions 验证
 gh repo set-default decker502/anyrouter-check-in
 gh workflow run "AnyRouter 自动签到"

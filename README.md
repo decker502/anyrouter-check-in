@@ -12,6 +12,8 @@
 - ✅ 同时支持 anyrouter.top 和 agentrouter.org 两个站点
 - ✅ 多种机器人通知（可选）
 - ✅ 绕过 WAF 限制
+- ✅ 失败自动重试（超时、网络错误等临时性问题）
+- ✅ 本地单账号/提供商测试模式（`--provider`、`--index`）
 
 ## 使用方法
 
@@ -117,6 +119,8 @@
 - 可以在 Actions 页面查看详细的运行日志
 - 支持部分账号失败，只要有账号成功签到，整个任务就不会失败
 - 只配置 `ANYROUTER_ACCOUNTS` 也能正常运行，`AGENTROUTER_ACCOUNTS` 为可选项
+- **AgentRouter 与 AnyRouter 签到逻辑不同**：AgentRouter 在请求用户信息时自动完成签到，无需单独调用签到接口；AnyRouter 需调用签到接口
+- **AgentRouter 访问**：若出现超时或 `ERR_HTTP_RESPONSE_CODE_FAILURE`，可能是地区限制。在环境变量或 `.env` 中配置 `HTTP_PROXY` 或 `http_proxy`（如 `http://127.0.0.1:7890`）使用代理
 - 报 401 错误，请重新获取 cookies，理论 1 个月失效，但有 Bug，详见 [#6](https://github.com/millylee/anyrouter-check-in/issues/6)
 - 请求 200，但出现 Error 1040（08004）：Too many connections，官方数据库问题，目前已修复，但遇到几次了，详见 [#7](https://github.com/millylee/anyrouter-check-in/issues/7)
 
@@ -211,11 +215,34 @@ uv run refresh_session.py agentrouter
 uv sync --dev
 
 # 安装 Playwright 浏览器
-playwright install chromium
+uv run playwright install chromium --with-deps
 
 # 按 .env.example 创建 .env
 uv run checkin.py
 ```
+
+### 本地单账号/提供商测试
+
+可指定只测试某个提供商或某个账号，便于调试：
+
+```bash
+# 全部账号
+uv run checkin.py
+
+# 仅 agentrouter 的账号
+uv run checkin.py --provider agentrouter
+
+# 仅 agentrouter 第 1 个账号
+uv run checkin.py --provider agentrouter --index 1
+
+# 仅 anyrouter 第 2 个账号
+uv run checkin.py --provider anyrouter --index 2
+
+# 全部账号中的第 3 个（按 anyrouter 先、agentrouter 后的顺序）
+uv run checkin.py --index 3
+```
+
+测试模式下不会发送通知，也不会更新余额缓存，适合本地排查问题。
 
 ## 测试
 
@@ -223,7 +250,7 @@ uv run checkin.py
 uv sync --dev
 
 # 安装 Playwright 浏览器
-playwright install chromium
+uv run playwright install chromium --with-deps
 
 # 运行测试
 uv run pytest tests/
