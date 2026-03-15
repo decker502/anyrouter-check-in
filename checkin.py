@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import os
+import random
 import sys
 from datetime import datetime
 
@@ -15,6 +16,11 @@ from dotenv import load_dotenv
 from playwright.async_api import async_playwright
 
 load_dotenv()
+
+
+async def _human_delay(min_ms: int = 500, max_ms: int = 1500):
+	"""随机延迟，模拟人类操作节奏"""
+	await asyncio.sleep(random.uniform(min_ms / 1000, max_ms / 1000))
 
 from notify import notify
 
@@ -150,23 +156,35 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 			if proxy_url:
 				proxy_config = {'server': proxy_url}
 
+			# 防自动化检测：禁用特征、模拟真实浏览器指纹
 			context = await p.chromium.launch_persistent_context(
 				user_data_dir=temp_dir,
 				headless=False,
 				ignore_https_errors=True,
 				proxy=proxy_config,
-				user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+				user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
 				viewport={'width': 1920, 'height': 1080},
+				locale='zh-CN',
+				timezone_id='Asia/Shanghai',
 				args=[
-					'--disable-blink-features=AutomationControlled',
+					'--disable-blink-features=AutomationControlled',  # 隐藏 webdriver 特征
+					'--disable-automation',
+					'--disable-infobars',
 					'--disable-dev-shm-usage',
 					'--disable-web-security',
 					'--disable-features=VizDisplayCompositor',
 					'--no-sandbox',
+					'--no-first-run',
+					'--no-default-browser-check',
 				],
 			)
 
 			page = await context.new_page()
+
+			# 注入脚本：移除 navigator.webdriver 自动化标识（真实浏览器中为 false）
+			await page.add_init_script("""
+				Object.defineProperty(navigator, 'webdriver', { get: () => false });
+			""")
 
 			try:
 				# 步骤1：访问登录页面获取 WAF cookies
@@ -177,6 +195,8 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 					await page.wait_for_function('document.readyState === "complete"', timeout=5000)
 				except Exception:
 					await page.wait_for_timeout(3000)
+
+				await _human_delay(800, 2000)
 
 				# 步骤2：设置用户 cookies
 				print(f'[PROCESSING] {masked_name}: Setting user cookies...')
@@ -189,11 +209,13 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 						'path': '/',
 					})
 				await context.add_cookies(cookie_list)
+				await _human_delay(500, 1200)
 
 				# 步骤3：访问控制台页面确保登录状态
 				print(f'[PROCESSING] {masked_name}: Accessing console page...')
 				await page.goto(f'https://{site}/console', wait_until='networkidle')
 				await page.wait_for_timeout(2000)
+				await _human_delay(1000, 2500)
 
 				# 步骤4：使用浏览器的 fetch API 获取用户信息
 				print(f'[PROCESSING] {masked_name}: Getting user info...')
@@ -234,6 +256,8 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 					except Exception as e:
 						print(f'[WARN] {masked_name}: Failed to parse user info: {str(e)[:50]}')
 
+				await _human_delay(300, 800)
+
 				# AgentRouter 与 AnyRouter 签到逻辑不同：
 				# - AgentRouter: 查询用户信息时自动完成签到，无需调用 sign_in 接口
 				# - AnyRouter: 需要调用 /api/user/sign_in 接口完成签到
@@ -247,6 +271,7 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 						return False, user_info
 
 				# AnyRouter: 步骤5 调用 sign_in 接口执行签到
+				await _human_delay(500, 1500)
 				print(f'[NETWORK] {masked_name}: Executing check-in (sign_in)')
 				checkin_result = await page.evaluate(f"""
 					async () => {{
