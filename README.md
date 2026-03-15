@@ -110,9 +110,8 @@
 
 ## 执行时间
 
-- 脚本每6小时执行一次（1. action 无法准确触发，基本延时 1~1.5h；2. 目前观测到签到是每 24h 而不是零点就可签到）
-- 两个站点的账号在同一次执行中依次签到
-- 你也可以随时手动触发签到
+- **本机 systemd/cron**：推荐方式，每天 6:00 执行，错过则开机补跑
+- **GitHub Actions**：已关闭定时（本机执行后无需 CI），可手动 Run workflow 触发
 
 ## 注意事项
 
@@ -121,7 +120,8 @@
 - 支持部分账号失败，只要有账号成功签到，整个任务就不会失败
 - 只配置 `ANYROUTER_ACCOUNTS` 也能正常运行，`AGENTROUTER_ACCOUNTS` 为可选项
 - **AgentRouter 与 AnyRouter 签到逻辑不同**：AgentRouter 在请求用户信息时自动完成签到，无需单独调用签到接口；AnyRouter 需调用签到接口
-- **AgentRouter 访问**：若出现超时或 `ERR_HTTP_RESPONSE_CODE_FAILURE`，可能是地区限制。在环境变量或 `.env` 中配置 `HTTP_PROXY` 或 `http_proxy`（如 `http://127.0.0.1:7890`）使用代理
+- **AgentRouter + GitHub Actions**：CI 数据中心 IP 会被阿里云 WAF 拦截，默认跳过。AgentRouter 请用本机 [systemd/cron](scripts/README.md) 执行；若已配 `HTTP_PROXY` 且想尝试 CI 签到，可添加 Secret `SKIP_AGENTROUTER_IN_CI=false`
+- **AgentRouter 本机**：若出现超时或 `ERR_HTTP_RESPONSE_CODE_FAILURE`，可在 `.env` 中配置 `HTTP_PROXY`
 - 报 401 错误，请重新获取 cookies，理论 1 个月失效，但有 Bug，详见 [#6](https://github.com/millylee/anyrouter-check-in/issues/6)
 - 请求 200，但出现 Error 1040（08004）：Too many connections，官方数据库问题，目前已修复，但遇到几次了，详见 [#7](https://github.com/millylee/anyrouter-check-in/issues/7)
 
@@ -215,7 +215,15 @@ uv run refresh_session.py agentrouter
    - `api_response.text_start`：响应内容开头（HTML 表示被重定向到验证页，JSON 表示接口正常）
    - `steps`：哪一步失败（goto_login / goto_console）
 
-根据对比结果判断：IP 限制、WAF 拦截、Cookie 传递问题等。
+根据对比结果判断根因。**常见情况**：阿里云 WAF 根据 IP 拦截，CI 数据中心 IP 收到 HTML 挑战页而非 JSON。**解决方案**：配置 `HTTP_PROXY`、使用 Self-hosted Runner，或采用本机定时执行（见下文）。
+
+## 本机定时执行（开机补跑）
+
+本机非 24 小时开机时，可选用本机定时方案：每天 6:00 执行，若当时未开机则**开机后自动补跑**。
+
+**Linux（推荐）**：`./scripts/setup-systemd.sh` 一键安装 systemd timer
+
+**Cron / Windows**：详见 [scripts/README.md](scripts/README.md)
 
 ## 故障排除
 

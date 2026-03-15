@@ -1,0 +1,13 @@
+[Unit]
+Description=AnyRouter Check-in Timer (daily + on boot if missed)
+Persistent=true
+
+[Timer]
+# 每天 6:00 执行
+OnCalendar=*-*-* 06:00:00
+# 若错过时间（如关机），开机后 5 分钟内补跑
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

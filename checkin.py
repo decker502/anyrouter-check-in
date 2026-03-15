@@ -38,6 +38,10 @@ def load_accounts(provider_filter: str | None = None):
 		('AGENTROUTER_ACCOUNTS', 'agentrouter.org', 'agentrouter'),
 	]
 
+	# CI 下默认跳过 AgentRouter（阿里云 WAF 拦截数据中心 IP）；配了 HTTP_PROXY 时可设 SKIP_AGENTROUTER_IN_CI=false 启用
+	if os.getenv('GITHUB_ACTIONS') and os.getenv('SKIP_AGENTROUTER_IN_CI', 'true').lower() in ('true', '1', 'yes'):
+		site_configs = [(ev, site, name) for ev, site, name in site_configs if name == 'anyrouter']
+
 	# 按 provider 过滤
 	if provider_filter:
 		site_configs = [(ev, site, name) for ev, site, name in site_configs if name == provider_filter]

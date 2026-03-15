@@ -1,0 +1,14 @@
+[Unit]
+Description=AnyRouter/AgentRouter Check-in
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# 修改为你的项目绝对路径
+WorkingDirectory=/home/decker/app/tools/anyrouter-check-in/anyrouter-check-in
+ExecStart=/home/decker/app/tools/anyrouter-check-in/anyrouter-check-in/scripts/checkin-wrapper.sh
+Environment=PATH=/home/decker/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

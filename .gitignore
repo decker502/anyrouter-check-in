@@ -7,3 +7,4 @@ __pycache__
 balance_hash.txt
 .browser_profile
 diagnostic.json
+.last_checkin_date

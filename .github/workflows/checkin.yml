@@ -1,7 +1,6 @@
+# 本机 systemd/cron 已覆盖，无需 CI 定时。保留 workflow_dispatch 供手动触发。
 name: AnyRouter 自动签到
 on:
-  schedule:
-    - cron: '0 */6 * * *'
   workflow_dispatch:
 
 jobs:
@@ -71,6 +70,8 @@ jobs:
 
     - name: 执行签到
       env:
+        # CI 下默认仅签 AnyRouter，AgentRouter 因 WAF 拦截请用本机 systemd/cron
+        SKIP_AGENTROUTER_IN_CI: "true"
         ANYROUTER_ACCOUNTS: ${{ secrets.ANYROUTER_ACCOUNTS }}
         AGENTROUTER_ACCOUNTS: ${{ secrets.AGENTROUTER_ACCOUNTS }}
         DINGDING_WEBHOOK: ${{ secrets.DINGDING_WEBHOOK }}
@@ -82,6 +83,7 @@ jobs:
         SERVERPUSHKEY: ${{ secrets.SERVERPUSHKEY }}
         FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
         WEIXIN_WEBHOOK: ${{ secrets.WEIXIN_WEBHOOK }}
+        HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
       run: |
         uv run checkin.py
 
