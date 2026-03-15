@@ -1,0 +1,42 @@
+# 手动触发诊断，捕获 AgentRouter 在 CI 环境中的真实响应，用于对比本地成功时找出根因
+name: 诊断 AgentRouter
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: windows-2025
+    environment: production
+    env:
+      PYTHONIOENCODING: utf-8
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: astral-sh/setup-uv@v3
+      with:
+        version: "latest"
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: 安装依赖
+      run: uv sync
+
+    - name: 安装 Playwright 浏览器
+      run: uv run playwright install chromium --with-deps
+
+    - name: 运行诊断
+      id: diagnose
+      env:
+        AGENTROUTER_ACCOUNTS: ${{ secrets.AGENTROUTER_ACCOUNTS }}
+        HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
+      run: |
+        uv run python diagnose.py
+
+    - name: 上传诊断结果
+      uses: actions/upload-artifact@v4
+      if: always() && hashFiles('diagnostic.json') != ''
+      with:
+        name: agentrouter-diagnostic-${{ github.run_id }}
+        path: diagnostic.json

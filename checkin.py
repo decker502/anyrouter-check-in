@@ -254,7 +254,15 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 							}
 							print(user_info['display'])
 					except Exception as e:
+						resp_text = user_info_result.get('text', '')
+						preview = (resp_text[:300] + '...') if len(resp_text) > 300 else resp_text
+						preview = preview.replace('\n', ' ')[:250]
 						print(f'[WARN] {masked_name}: Failed to parse user info: {str(e)[:50]}')
+						print(f'[DEBUG] {masked_name}: Response preview: {preview!r}')
+				else:
+					status = user_info_result.get('status', '?')
+					err = user_info_result.get('error', user_info_result.get('text', '')[:100])
+					print(f'[WARN] {masked_name}: User info request failed (HTTP {status}): {err}')
 
 				await _human_delay(300, 800)
 

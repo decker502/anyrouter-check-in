@@ -197,6 +197,26 @@ uv run refresh_session.py agentrouter
 
 浏览器配置保存在 `.browser_profile/` 目录，**首次运行**需要完整登录 GitHub，后续运行 GitHub 登录状态自动保留，只需点击「Login with GitHub」即可。
 
+## AgentRouter CI 失败诊断
+
+当 AgentRouter 在 GitHub Actions 中失败但本机成功时，可通过诊断流程获取根因：
+
+1. **本机生成成功基线**：
+   ```bash
+   uv run python diagnose.py
+   # 将 diagnostic.json 保存为 diagnostic-local.json
+   ```
+
+2. **在 GitHub 上运行诊断**：Actions →「诊断 AgentRouter」→ Run workflow
+
+3. **对比结果**：运行完成后下载 artifact，对比两份 `diagnostic.json`：
+   - `runner_ip`：CI 为数据中心 IP，本机为家用/公司 IP
+   - `api_response.status`：HTTP 状态码
+   - `api_response.text_start`：响应内容开头（HTML 表示被重定向到验证页，JSON 表示接口正常）
+   - `steps`：哪一步失败（goto_login / goto_console）
+
+根据对比结果判断：IP 限制、WAF 拦截、Cookie 传递问题等。
+
 ## 故障排除
 
 如果签到失败，请检查：
