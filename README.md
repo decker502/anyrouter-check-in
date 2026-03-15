@@ -10,6 +10,7 @@
 
 - ✅ 单个/多账号自动签到
 - ✅ 同时支持 anyrouter.top 和 agentrouter.org 两个站点
+- ✅ AgentRouter Claude 模型监控（每 30 分钟检查，发现上架则钉钉提醒）
 - ✅ 多种机器人通知（可选）
 - ✅ 绕过 WAF 限制
 - ✅ 失败自动重试（超时、网络错误等临时性问题）
@@ -221,7 +222,7 @@ uv run refresh_session.py agentrouter
 
 本机非 24 小时开机时，可选用本机定时方案：每天 6:00 执行，若当时未开机则**开机后自动补跑**。
 
-**Linux（推荐）**：`./scripts/setup-systemd.sh` 一键安装 systemd timer
+**Linux（推荐）**：`./scripts/setup-systemd.sh` 一键安装 systemd timer（同时包含签到 + Claude 模型检查）
 
 **Cron / Windows**：详见 [scripts/README.md](scripts/README.md)
 

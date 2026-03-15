@@ -1,0 +1,13 @@
+[Unit]
+Description=AgentRouter Claude 模型检查（发现则钉钉通知）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/decker/app/tools/anyrouter-check-in/anyrouter-check-in
+ExecStart=/home/decker/app/tools/anyrouter-check-in/anyrouter-check-in/scripts/claude-check-wrapper.sh
+Environment=PATH=/home/decker/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

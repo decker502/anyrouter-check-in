@@ -1,0 +1,13 @@
+[Unit]
+Description=AgentRouter Claude 模型检查定时器（每30分钟）
+
+[Timer]
+# 每 30 分钟执行一次（整点与半点）
+OnCalendar=*-*-* *:00,30:00
+# 若错过时间则尽快补跑
+Persistent=true
+# 随机延迟 0-60 秒，避免整点集中请求
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

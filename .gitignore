@@ -8,3 +8,4 @@ balance_hash.txt
 .browser_profile
 diagnostic.json
 .last_checkin_date
+.last_claude_notify_date
