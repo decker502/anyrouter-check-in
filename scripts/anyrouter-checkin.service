@@ -9,6 +9,8 @@ Type=oneshot
 WorkingDirectory=/home/decker/app/tools/anyrouter-check-in/anyrouter-check-in
 ExecStart=/home/decker/app/tools/anyrouter-check-in/anyrouter-check-in/scripts/checkin-wrapper.sh
 Environment=PATH=/home/decker/.local/bin:/usr/local/bin:/usr/bin:/bin
+# 无界面环境，强制 headless 模式（timer 无 DISPLAY）
+Environment=HEADLESS=1
 
 [Install]
 WantedBy=default.target

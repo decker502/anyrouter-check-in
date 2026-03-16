@@ -59,17 +59,13 @@
 ```json
 [
   {
-    "name": "我的主账号",
-    "cookies": {
-      "session": "account1_session_value"
-    },
+    "name": "my_github_username",
+    "cookies": {"session": "account1_session_value"},
     "api_user": "account1_api_user_id"
   },
   {
-    "name": "备用账号",
-    "cookies": {
-      "session": "account2_session_value"
-    },
+    "name": "second_github_username",
+    "cookies": {"session": "account2_session_value"},
     "api_user": "account2_api_user_id"
   }
 ]
@@ -79,6 +75,7 @@
 - `cookies` (必需)：用于身份验证的 cookies 数据
 - `api_user` (必需)：用于请求头的 new-api-user 参数
 - `name` (可选)：自定义账号显示名称，用于通知和日志中标识账号
+- `github_login` (可选，仅 AgentRouter)：当有多个 GitHub 账号时，填对应该 AgentRouter 账号的 GitHub 用户名或邮箱；不填则默认用 `name` 的值匹配；两者都无则点击第一个账号
 
 如果未提供 `name` 字段，会使用 `Account 1`、`Account 2` 等默认名称。
 
@@ -120,7 +117,8 @@
 - 可以在 Actions 页面查看详细的运行日志
 - 支持部分账号失败，只要有账号成功签到，整个任务就不会失败
 - 只配置 `ANYROUTER_ACCOUNTS` 也能正常运行，`AGENTROUTER_ACCOUNTS` 为可选项
-- **AgentRouter 与 AnyRouter 签到逻辑不同**：AgentRouter 在请求用户信息时自动完成签到，无需单独调用签到接口；AnyRouter 需调用签到接口
+- **AnyRouter**：脚本调用 `/api/user/sign_in` 完成签到
+- **AgentRouter**：无 sign_in 接口，脚本通过「清 cookie → 点 GitHub 登录 → 选账号」模拟退出重登以触发签到；需先运行 `uv run refresh_session.py agentrouter` 完成首次 GitHub 登录，签到时会复用 `.browser_profile` 中的登录状态
 - **AgentRouter + GitHub Actions**：CI 数据中心 IP 会被阿里云 WAF 拦截，默认跳过。AgentRouter 请用本机 [systemd/cron](scripts/README.md) 执行；若已配 `HTTP_PROXY` 且想尝试 CI 签到，可添加 Secret `SKIP_AGENTROUTER_IN_CI=false`
 - **AgentRouter 本机**：若出现超时或 `ERR_HTTP_RESPONSE_CODE_FAILURE`，可在 `.env` 中配置 `HTTP_PROXY`
 - 报 401 错误，请重新获取 cookies，理论 1 个月失效，但有 Bug，详见 [#6](https://github.com/millylee/anyrouter-check-in/issues/6)
@@ -270,9 +268,12 @@ uv run checkin.py --provider anyrouter --index 2
 
 # 全部账号中的第 3 个（按 anyrouter 先、agentrouter 后的顺序）
 uv run checkin.py --index 3
+
+# 调试模式（卡在 GitHub 时用）：打印诊断信息并保存 debug_github.png 截图
+uv run checkin.py --provider agentrouter --index 1 --debug
 ```
 
-测试模式下不会发送通知，也不会更新余额缓存，适合本地排查问题。
+测试模式下不会发送通知，也不会更新余额缓存，适合本地排查问题。详见 [docs/debug-checkin.md](docs/debug-checkin.md)。
 
 ## 测试
 

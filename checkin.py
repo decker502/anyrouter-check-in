@@ -11,11 +11,57 @@ import os
 import random
 import sys
 from datetime import datetime
+from pathlib import Path
 
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
 
 load_dotenv()
+
+BROWSER_PROFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.browser_profile')
+ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+
+
+def _is_headless_env() -> bool:
+	"""systemd/cron 等无界面环境：无 DISPLAY 时自动使用 headless"""
+	if os.getenv('HEADLESS', '').lower() in ('1', 'true', 'yes'):
+		return True
+	return not bool(os.getenv('DISPLAY'))
+
+
+def _update_env_account(env_var: str, accounts: list, index: int, updated_account: dict):
+	"""更新 .env 中指定账号的配置"""
+	new_accounts = list(accounts)
+	new_accounts[index] = updated_account
+	new_json = json.dumps(new_accounts, ensure_ascii=False)
+	path = Path(ENV_FILE)
+	if not path.exists():
+		path.write_text(f'{env_var}={new_json}\n', encoding='utf-8')
+		return
+	lines = path.read_text(encoding='utf-8').splitlines(keepends=True)
+	out = []
+	found = False
+	for line in lines:
+		if line.startswith(f'{env_var}='):
+			out.append(f'{env_var}={new_json}\n')
+			found = True
+		else:
+			out.append(line)
+	if not found:
+		out.append(f'{env_var}={new_json}\n')
+	path.write_text(''.join(out), encoding='utf-8')
+
+
+async def _clear_site_cookies(context, site: str):
+	"""清除指定站点 cookies，保留 GitHub 登录状态"""
+	try:
+		await context.clear_cookies(domain=site)
+	except TypeError:
+		all_cookies = await context.cookies()
+		await context.clear_cookies()
+		keep = [c for c in all_cookies if site not in c.get('domain', '')]
+		if keep:
+			await context.add_cookies(keep)
 
 
 async def _human_delay(min_ms: int = 500, max_ms: int = 1500):
@@ -146,10 +192,268 @@ def parse_cookies(cookies_data):
 	return {}
 
 
-async def check_in_with_playwright(account_name: str, user_cookies: dict, api_user: str, site: str = 'anyrouter.top'):
-	"""使用 Playwright 执行完整的签到流程"""
+async def _agentrouter_relogin_checkin(
+	account_name: str, api_user: str, account: dict,
+	env_var: str, site_accounts: list, site_index: int,
+	*,
+	debug: bool = False,
+) -> tuple[bool, dict | None]:
+	"""AgentRouter 自动重登以触发签到：用持久化 profile，清 cookie → 点 GitHub 登录 → 选账号 → 回跳"""
+	masked_name = mask_sensitive_info(account_name)
+	site = 'agentrouter.org'
+	profile_dir = Path(BROWSER_PROFILE_DIR)
+
+	if not profile_dir.exists() or not any(profile_dir.iterdir()):
+		print(f'[WARN] {masked_name}: .browser_profile 为空，请先运行 uv run refresh_session.py agentrouter 完成首次登录')
+		return False, None
+
+	proxy_url = os.getenv('HTTP_PROXY') or os.getenv('http_proxy')
+	proxy_config = {'server': proxy_url} if proxy_url else None
+
+	async with async_playwright() as p:
+		headless = _is_headless_env()
+		if headless:
+			print(f'[INFO] {masked_name}: 无界面环境，使用 headless 模式')
+		launch_opts = dict(
+			user_data_dir=str(profile_dir),
+			headless=headless,
+			ignore_https_errors=True,
+			proxy=proxy_config,
+			viewport={'width': 1280, 'height': 900},
+			args=[
+				'--disable-blink-features=AutomationControlled',
+				'--no-sandbox',
+			],
+		)
+		try:
+			context = await p.chromium.launch_persistent_context(channel='chrome', **launch_opts)
+		except Exception:
+			context = await p.chromium.launch_persistent_context(**launch_opts)
+		page = context.pages[0] if context.pages else await context.new_page()
+
+		try:
+			# 1. 清除 AgentRouter cookies（等效退出）
+			print(f'[PROCESSING] {masked_name}: 清除 session，准备重新登录...')
+			await _clear_site_cookies(context, site)
+			await _human_delay(500, 1200)
+
+			# 2. 进入登录页
+			await page.goto(f'https://{site}/login', wait_until='networkidle')
+			await page.wait_for_timeout(2000)
+
+			# 3. 点击「Login with GitHub」（避免点到 New API 文档等无关链接）
+			# 优先：同域 OAuth 路径 /api/oauth/github，或直连 github.com；排除 newapi.ai 等文档站
+			github_selectors = [
+				'a[href*="/api/oauth/github"]',
+				'a[href^="/api/oauth/github"]',
+				'a[href*="github.com/login/oauth"]',
+				'a[href*="github.com"][href*="oauth"]',
+				'button:has-text("GitHub")',
+				'a:has-text("GitHub"):not([href*="newapi"])',
+				'a:has-text("Login with GitHub"):not([href*="newapi"])',
+			]
+			clicked = False
+			oauth_href = None
+			for sel in github_selectors:
+				try:
+					loc = page.locator(sel).first
+					if await loc.count() > 0:
+						href = await loc.get_attribute('href')
+						# 排除指向文档站的链接
+						if href and any(x in (href or '').lower() for x in ['newapi.ai', 'newapi.pro', 'apifox', 'docs.']):
+							continue
+						oauth_href = href
+						await loc.click(timeout=3000)
+						clicked = True
+						break
+				except Exception:
+					continue
+			if not clicked:
+				print(f'[FAILED] {masked_name}: 未找到 GitHub 登录按钮，请检查页面')
+				await context.close()
+				return False, None
+
+			print(f'[PROCESSING] {masked_name}: 已点击 GitHub 登录，等待跳转...')
+			# 4. 等待 GitHub 跳转（可能当前页跳转，也可能在新标签页打开）
+			await page.wait_for_timeout(4000)
+			# 若在新标签打开，切换到含 github.com 的页
+			for p in context.pages:
+				if 'github.com' in p.url:
+					page = p
+					if debug:
+						print(f'[DEBUG] 使用新标签页: {page.url[:70]}')
+					break
+			# 若仍在 agentrouter，尝试直接打开 OAuth 链接（点击未触发导航时）
+			if f'{site}' in page.url and 'github.com' not in page.url and oauth_href:
+				nav_url = oauth_href if oauth_href.startswith('http') else f'https://{site}{oauth_href}' if oauth_href.startswith('/') else f'https://{site}/{oauth_href}'
+				print(f'[PROCESSING] {masked_name}: 点击未跳转，直接访问 OAuth: {nav_url[:60]}...')
+				await page.goto(nav_url, wait_until='domcontentloaded', timeout=15000)
+			try:
+				await page.wait_for_load_state('networkidle', timeout=12000)
+			except Exception:
+				await page.wait_for_load_state('domcontentloaded')
+			await page.wait_for_timeout(2000)
+			# 默认用 name 匹配 GitHub 账号，可显式配 github_login 覆盖
+			github_login = (account.get('github_login') or account.get('name') or '').strip()
+			if github_login:
+				print(f'[PROCESSING] {masked_name}: 将匹配 GitHub 账号 {github_login!r}')
+			else:
+				print(f'[PROCESSING] {masked_name}: 在 GitHub 页面，自动查找并点击...')
+			if debug:
+				print(f'[DEBUG] 当前页面: {page.url}')
+
+			async def _try_github_continue():
+				"""GitHub /login/oauth/select_account 页结构：
+				第一行：Signed in as X，form[action*=authorize_app] + input value=Continue；
+				其他行：strong 为用户名，form[action*=switch_account] + input value=Select。
+				匹配 name 后点击对应 Continue 或 Select；Select 会刷新页再点 Continue。
+				"""
+				r = await page.evaluate("""
+					(args) => {
+						const hint = (args && args.github_login) ? String(args.github_login).trim().toLowerCase() : '';
+						const rows = document.querySelectorAll('.Box .Box-row');
+						for (const row of rows) {
+							const txt = (row.textContent || '').toLowerCase();
+							if (/use a different account|use another/.test(txt)) continue;
+							const hasMatch = hint && txt.includes(hint);
+							const contForm = row.querySelector('form[action*="authorize_app"]');
+							const switchForm = row.querySelector('form[action*="switch_account"]');
+							if (contForm) {
+								if (!hint || hasMatch) {
+									const btn = contForm.querySelector('input[type="submit"], button[type="submit"]');
+									if (btn && /continue/i.test(btn.value || btn.textContent || ''))
+										{ btn.click(); return {ok: true, action: 'continue'}; }
+								}
+							}
+							if (switchForm && hasMatch) {
+								const btn = switchForm.querySelector('input[type="submit"], button[type="submit"]');
+								if (btn) { btn.click(); return {ok: true, action: 'select'}; }
+							}
+						}
+						if (!hint) {
+							const first = document.querySelector('form[action*="authorize_app"] input[type="submit"]');
+							if (first && first.value === 'Continue') { first.click(); return {ok: true, action: 'continue'}; }
+						}
+						return {ok: false};
+					}
+				""", {'github_login': github_login})
+				return r
+
+			for step in range(60):
+				url = page.url
+				if debug and step % 3 == 0:
+					print(f'[DEBUG] step={step} url={url[:90]}')
+				# 已回到 agentrouter 且不在登录页即视为成功（含 /console /dashboard /panel 或根路径）
+				if site in url and '/login' not in url:
+					break
+				if 'github.com' in url:
+					try:
+						if debug and step % 5 == 0:
+							diag = await page.evaluate("""
+								(args) => {
+									const hint = (args && args.github_login) ? String(args.github_login) : '';
+									const rows = document.querySelectorAll('.Box .Box-row');
+									const rowInfos = [];
+									rows.forEach((r, i) => {
+										const t = (r.textContent || '').substring(0, 80);
+										const cont = r.querySelector('form[action*="authorize_app"]');
+										const sw = r.querySelector('form[action*="switch_account"]');
+										rowInfos.push({i, preview: t.replace(/\\s+/g,' ').trim(), hasContinue: !!cont, hasSelect: !!sw});
+									});
+									return {url: location.href, hint, rowCount: rows.length, rows: rowInfos};
+								}
+							""", {'github_login': github_login})
+							print(f'[DEBUG] step={step} url={url[:80]}')
+							print(f'[DEBUG] hint={diag.get("hint")!r} rows={diag.get("rowCount")} {diag.get("rows")}')
+							await page.screenshot(path='debug_github.png')
+							print(f'[DEBUG] 已保存 debug_github.png')
+						r = await _try_github_continue()
+						if debug:
+							print(f'[DEBUG] step={step} _try_github_continue => {r}')
+						if r.get('ok'):
+							await page.wait_for_timeout(4000)  # 等待跳转
+							if 'github.com' not in page.url:
+								break
+							# 若仍在 github，可能有多步，短暂等待后继续
+							await page.wait_for_timeout(1500)
+						else:
+							await page.wait_for_timeout(1000)
+					except Exception as e:
+						if debug:
+							print(f'[DEBUG] 异常: {e}')
+						await page.wait_for_timeout(1000)
+				else:
+					await page.wait_for_timeout(1000)
+
+			# 5. 已回到 agentrouter（非登录页），等待页面稳定
+			await page.wait_for_timeout(2000)
+
+			# 6. 提取新 session 并获取用户信息
+			cookies = await context.cookies(f'https://{site}')
+			session_cookie = next((c for c in cookies if c['name'] == 'session'), None)
+			if not session_cookie:
+				print(f'[FAILED] {masked_name}: 未能提取新 session')
+				await context.close()
+				return False, None
+
+			user_info_result = await page.evaluate(f"""
+				async () => {{
+					try {{
+						const r = await fetch('https://{site}/api/user/self', {{
+							headers: {{'Accept': 'application/json', 'new-api-user': '{api_user}'}},
+							credentials: 'include'
+						}});
+						const text = await r.text();
+						return {{ ok: r.ok, text }};
+					}} catch (e) {{ return {{ ok: false, text: e.toString() }}; }}
+				}}
+			""")
+
+			await context.close()
+
+			if not user_info_result.get('ok'):
+				return False, None
+			data = json.loads(user_info_result.get('text', '{}'))
+			if not data.get('success') or not data.get('data'):
+				return False, None
+			ud = data['data']
+			quota = round(ud.get('quota', 0) / 500000, 2)
+			used = round(ud.get('used_quota', 0) / 500000, 2)
+			user_info = {
+				'success': True,
+				'quota': quota,
+				'used_quota': used,
+				'display': f':money: Current balance: ${quota}, Used: ${used}',
+			}
+			print(user_info['display'])
+			print(f'[SUCCESS] {masked_name}: 重登成功，签到已触发')
+
+			# 7. 更新 .env 中的 session
+			updated = {**account, 'cookies': {'session': session_cookie['value']}, 'api_user': api_user}
+			if 'name' in account:
+				updated['name'] = account['name']
+			_update_env_account(env_var, site_accounts, site_index, updated)
+
+			return True, user_info
+		except Exception as e:
+			await context.close()
+			print(f'[FAILED] {masked_name}: 重登异常: {e}')
+			raise
+
+
+async def check_in_with_playwright(account_name: str, user_cookies: dict, api_user: str, site: str = 'anyrouter.top', agentrouter_update=None, debug=False):
+	"""使用 Playwright 执行完整的签到流程
+
+	agentrouter_update: 当 site 为 agentrouter 时传入 (env_var, site_accounts, site_index)，用于重登后更新 .env
+	"""
 	masked_name = mask_sensitive_info(account_name)
 	print(f'[PROCESSING] {masked_name}: Starting browser for check-in...')
+
+	# AgentRouter：走自动重登流程触发签到
+	if site == 'agentrouter.org' and agentrouter_update:
+		env_var, site_accounts, site_index = agentrouter_update
+		account = site_accounts[site_index]
+		return await _agentrouter_relogin_checkin(account_name, api_user, account, env_var, site_accounts, site_index, debug=debug)
 
 	async with async_playwright() as p:
 		import tempfile
@@ -161,9 +465,12 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 				proxy_config = {'server': proxy_url}
 
 			# 防自动化检测：禁用特征、模拟真实浏览器指纹
+			headless = _is_headless_env()
+			if headless:
+				print(f'[INFO] {masked_name}: 无界面环境，使用 headless 模式')
 			context = await p.chromium.launch_persistent_context(
 				user_data_dir=temp_dir,
-				headless=False,
+				headless=headless,
 				ignore_https_errors=True,
 				proxy=proxy_config,
 				user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
@@ -270,19 +577,7 @@ async def check_in_with_playwright(account_name: str, user_cookies: dict, api_us
 
 				await _human_delay(300, 800)
 
-				# AgentRouter 与 AnyRouter 签到逻辑不同：
-				# - AgentRouter: 查询用户信息时自动完成签到，无需调用 sign_in 接口
-				# - AnyRouter: 需要调用 /api/user/sign_in 接口完成签到
-				if site == 'agentrouter.org':
-					await context.close()
-					if user_info and user_info.get('success'):
-						print(f'[SUCCESS] {masked_name}: Check-in completed (AgentRouter auto check-in on user info request)')
-						return True, user_info
-					else:
-						print(f'[FAILED] {masked_name}: Failed to get user info')
-						return False, user_info
-
-				# AnyRouter: 步骤5 调用 sign_in 接口执行签到
+				# AnyRouter: 调用 sign_in 接口执行签到
 				await _human_delay(500, 1500)
 				print(f'[NETWORK] {masked_name}: Executing check-in (sign_in)')
 				checkin_result = await page.evaluate(f"""
@@ -361,8 +656,11 @@ def _is_retryable_error(error_msg: str) -> bool:
 	)
 
 
-async def check_in_account(account_info, account_index):
-	"""为单个账号执行签到操作（含失败重试）"""
+async def check_in_account(account_info, account_index, agentrouter_update=None, debug=False):
+	"""为单个账号执行签到操作（含失败重试）
+
+	agentrouter_update: (env_var, site_accounts, site_index)，仅 AgentRouter 需要，用于重登后更新 .env
+	"""
 	account_name = get_account_display_name(account_info, account_index)
 	masked_name = mask_sensitive_info(account_name)
 	print(f'\n[PROCESSING] Starting to process {masked_name}')
@@ -376,9 +674,9 @@ async def check_in_account(account_info, account_index):
 		print(f'[FAILED] {masked_name}: API user identifier not found')
 		return False, None
 
-	# 解析用户 cookies
+	# 解析用户 cookies（AgentRouter 走重登流程时也会用到，但会先清 cookie）
 	user_cookies = parse_cookies(cookies_data)
-	if not user_cookies:
+	if not user_cookies and site != 'agentrouter.org':
 		print(f'[FAILED] {masked_name}: Invalid configuration format')
 		return False, None
 
@@ -388,7 +686,11 @@ async def check_in_account(account_info, account_index):
 
 	for attempt in range(max_retries + 1):
 		try:
-			success, user_info = await check_in_with_playwright(account_name, user_cookies, api_user, site)
+			success, user_info = await check_in_with_playwright(
+				account_name, user_cookies, api_user, site,
+				agentrouter_update=agentrouter_update,
+				debug=debug,
+			)
 			if success:
 				return True, user_info
 			# 非异常返回的失败（如 API 返回错误），不重试
@@ -430,6 +732,11 @@ def parse_args():
 		metavar='N',
 		help='仅测试第 N 个账号（从 1 开始），可与 --provider 组合使用',
 	)
+	parser.add_argument(
+		'--debug',
+		action='store_true',
+		help='调试模式：打印 GitHub 页面诊断信息、保存 debug_github.png 截图，便于排查卡住问题',
+	)
 	return parser.parse_args()
 
 
@@ -440,24 +747,30 @@ async def main(args=None):
 	print('[SYSTEM] Multi-site multi-account auto check-in script started (using Playwright)')
 	print(f'[TIME] Execution time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
 
-	# 加载账号配置
-	accounts = load_accounts(provider_filter=args.provider)
-	if not accounts:
+	# 加载账号配置（all_accounts 保留完整列表，用于更新 .env 时只替换单账号）
+	all_accounts = load_accounts(provider_filter=args.provider)
+	if not all_accounts:
 		print('[FAILED] Unable to load account configuration, program exits')
 		sys.exit(1)
 
 	# 按 index 过滤
 	if args.index is not None:
-		if args.index < 1 or args.index > len(accounts):
-			print(f'[FAILED] Index must be 1-{len(accounts)}, got {args.index}')
+		if args.index < 1 or args.index > len(all_accounts):
+			filter_hint = f' (--provider {args.provider})' if args.provider else ''
+			print(f'[FAILED] Index must be 1-{len(all_accounts)}{filter_hint}, got {args.index}')
+			print(f'[HINT] 当前共 {len(all_accounts)} 个账号，使用 --index 1 或省略 --index 运行全部')
 			sys.exit(1)
-		accounts = [accounts[args.index - 1]]
+		accounts = [all_accounts[args.index - 1]]
 		print(f'[INFO] Testing single account: index {args.index} ({get_account_display_name(accounts[0], args.index - 1)})')
 	else:
+		accounts = all_accounts
 		print(f'[INFO] Found {len(accounts)} account configurations')
 
 	# 加载余额hash
 	last_balance_hash = load_balance_hash()
+
+	# AgentRouter 完整账号列表（用 all_accounts 构建，确保更新 .env 时只改当前账号、不覆盖其他）
+	agentrouter_accounts = [a for a in all_accounts if a.get('_site') == 'agentrouter.org']
 
 	# 为每个账号执行签到，并记录每个账号的结果用于通知
 	success_count = 0
@@ -469,8 +782,16 @@ async def main(args=None):
 
 	for i, account in enumerate(accounts):
 		account_key = f'account_{i + 1}'
+		site = account.get('_site', 'anyrouter.top')
+		agentrouter_update = None
+		if site == 'agentrouter.org' and agentrouter_accounts:
+			if args.index is not None:
+				site_index = args.index - 1  # 单账号模式：第 N 个即 index N-1
+			else:
+				site_index = len([a for a in accounts[:i] if a.get('_site') == 'agentrouter.org'])
+			agentrouter_update = ('AGENTROUTER_ACCOUNTS', agentrouter_accounts, site_index)
 		try:
-			success, user_info = await check_in_account(account, i)
+			success, user_info = await check_in_account(account, i, agentrouter_update=agentrouter_update, debug=args.debug)
 			if success:
 				success_count += 1
 
@@ -564,7 +885,6 @@ async def main(args=None):
 	if need_notify and notification_content:
 		time_info = f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'
 		notify_content = '\n'.join([time_info, ''] + notification_content)
-
 		print(notify_content)
 		if not test_mode:
 			notify.push_message('AnyRouter Check-in Alert', notify_content, msg_type='text')
