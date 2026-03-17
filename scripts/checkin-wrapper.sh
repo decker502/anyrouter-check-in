@@ -12,7 +12,7 @@ if [[ -f "$CHECK_FILE" ]] && [[ "$(cat "$CHECK_FILE")" == "$today" ]]; then
 fi
 
 echo "[RUN] Running check-in..."
-if uv run checkin.py; then
+if uv run checkin.py --provider agentrouter; then
 	echo "$today" > "$CHECK_FILE"
 	echo "[OK] Check-in done, saved date"
 else
