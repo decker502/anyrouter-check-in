@@ -93,9 +93,24 @@ async def refresh_single_account(context, page, account: dict, index: int, total
 		# 清除站点的 cookies（保留 GitHub 登录状态）
 		await clear_site_cookies(context, site)
 
-		# 导航到登录页面（不限超时，等用户操作）
+		# 导航到登录页面（带重试和手动导航兜底）
 		print('正在导航到登录页面...')
-		await page.goto(f'https://{site}/login', wait_until='networkidle', timeout=0)
+		goto_ok = False
+		for attempt in range(3):
+			try:
+				await page.goto(f'https://{site}/login', wait_until='networkidle', timeout=30000)
+				goto_ok = True
+				break
+			except Exception as e:
+				print(f'  导航失败 (尝试 {attempt + 1}/3): {e}')
+				if attempt < 2:
+					print('  等待 3 秒后重试...')
+					await page.wait_for_timeout(3000)
+
+		if not goto_ok:
+			print(f'\n⚠️  自动导航失败，请在浏览器中手动打开 https://{site}/login')
+			print('完成后按回车继续...')
+			await asyncio.get_event_loop().run_in_executor(None, input)
 
 		# 等待 WAF 通过
 		try:
